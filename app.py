@@ -1,170 +1,64 @@
-from flask import Flask, request
 import requests
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-
-TOKEN = "YOUR_BOT_TOKEN"
+import re
+import os
+from bs4 import BeautifulSoup
+from flask import Flask, request, jsonify
+from flask_cors import CORS # এডেড: অ্যাপ থেকে কানেকশন সহজ করার জন্য
 
 app = Flask(__name__)
+CORS(app) # এটি অ্যাপের সাথে সার্ভারের যোগাযোগ নিশ্চিত করবে
 
-# ================= BOT =================
-application = ApplicationBuilder().token(TOKEN).build()
+headers = {
+    "User-Agent": "Mozilla/5.0",
+    "Referer": "http://www.educationboardresults.gov.bd/index.php"
+}
 
-users = {}
+def solve_captcha(session):
+    url = "http://www.educationboardresults.gov.bd/index.php"
+    try:
+        res = session.get(url, headers=headers)
+        match = re.search(r'(\d+\s*\+\s*\d+)', res.text)
+        if match:
+            return str(eval(match.group(1)))
+    except: pass
+    return None
 
-# ================= MENU =================
-def main_menu():
-    return ReplyKeyboardMarkup([
-        ["🚀 রেজাল্ট বের করুন 🚀"]
-    ], resize_keyboard=True)
+@app.route('/check', methods=['GET'])
+def check():
+    exam = request.args.get('exam', 'ssc')
+    year = request.args.get('year')
+    board = request.args.get('board')
+    roll = request.args.get('roll')
+    reg = request.args.get('reg')
 
-# ================= START =================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    users[update.effective_chat.id] = {}
-    await update.message.reply_text(
-        "🎉 Welcome!\n\nResult দেখতে নিচের বাটনে চাপ দিন 👇",
-        reply_markup=main_menu()
-    )
+    session = requests.Session()
+    ans = solve_captcha(session)
+    if not ans: return jsonify({"error": "Captcha Error"}), 500
 
-# ================= HANDLE =================
-async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    text = update.message.text
+    payload = {
+        "sr": "3", "et": "2", "exam": exam, "year": year,
+        "board": board.lower(), "roll": roll, "reg": reg,
+        "value_s": ans, "button2": "Submit"
+    }
 
-    if chat_id not in users:
-        users[chat_id] = {}
+    try:
+        res = session.post("http://www.educationboardresults.gov.bd/result.php", data=payload, headers=headers)
+        if "Result" not in res.text: return jsonify({"error": "Not Found"}), 404
+        
+        soup = BeautifulSoup(res.text, "html.parser")
+        def get_v(label):
+            tag = soup.find(string=re.compile(label))
+            return tag.find_next().text.strip() if tag else "N/A"
 
-    data = users[chat_id]
+        return jsonify({
+            "name": get_v("Name"),
+            "father": get_v("Father's Name"),
+            "mother": get_v("Mother's Name"),
+            "gpa": get_v("GPA"),
+            "result": get_v("Result"),
+            "institute": get_v("Institute")
+        })
+    except: return jsonify({"error": "Server Error"}), 500
 
-    # MAIN BUTTON
-    if text == "🚀 রেজাল্ট বের করুন 🚀":
-        users[chat_id] = {}
-        keyboard = [["SSC", "HSC"]]
-        await update.message.reply_text("📘 Exam নির্বাচন করুন:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
-        return
-
-    # EXAM
-    if "exam" not in data:
-        data["exam"] = text.lower()
-        await update.message.reply_text("📅 Year লিখুন (e.g. 2020):")
-        return
-
-    # YEAR
-    if "year" not in data:
-        data["year"] = text
-        await update.message.reply_text("🏫 Board লিখুন (e.g. dhaka):")
-        return
-
-    # BOARD
-    if "board" not in data:
-        data["board"] = text.lower()
-        await update.message.reply_text("🆔 Roll লিখুন:")
-        return
-
-    # ROLL
-    if "roll" not in data:
-        data["roll"] = text
-        await update.message.reply_text("📄 Registration লিখুন:")
-        return
-
-    # REG
-    if "reg" not in data:
-        data["reg"] = text
-
-        session = requests.Session()
-        data["session"] = session
-
-        await send_captcha(update, data)
-        return
-
-    # CAPTCHA RELOAD
-    if text == "🔄 Reload Captcha":
-        await send_captcha(update, data)
-        return
-
-    # CAPTCHA SUBMIT
-    if "captcha" not in data:
-        data["captcha"] = text
-
-        payload = {
-            "board": data["board"],
-            "exam": data["exam"],
-            "year": data["year"],
-            "result_type": "1",
-            "roll": data["roll"],
-            "reg": data["reg"],
-            "captcha": data["captcha"]
-        }
-
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "X-Requested-With": "XMLHttpRequest",
-            "Origin": "https://eboardresults.com",
-            "Referer": "https://eboardresults.com/v2/home",
-            "User-Agent": "Mozilla/5.0"
-        }
-
-        res = data["session"].post("https://eboardresults.com/v2/getres", data=payload, headers=headers)
-        result = res.json()
-
-        if result.get("status") != 0:
-            await update.message.reply_text("❌ Captcha ভুল")
-            await send_captcha(update, data)
-            return
-
-        info = result["res"]
-
-        gpa = info.get("res_detail","N/A").replace("GPA=","")
-
-        msg = f"""
-👨‍🎓 STUDENT INFORMATION
-━━━━━━━━━━━━━━━
-👤 Name: {info.get('name')}
-👨 Father: {info.get('fname')}
-👩 Mother: {info.get('mname')}
-
-📘 {data['exam'].upper()} {data['year']}
-🏫 Board: {info.get('board_name')}
-
-⭐ GPA: {gpa}
-"""
-
-        await update.message.reply_text(msg, reply_markup=main_menu())
-
-        users[chat_id] = {}
-
-# ================= CAPTCHA =================
-async def send_captcha(update, data):
-    chat_id = update.effective_chat.id
-
-    url = "https://eboardresults.com/v2/captcha"
-    r = data["session"].get(url)
-
-    with open(f"{chat_id}.jpg","wb") as f:
-        f.write(r.content)
-
-    keyboard = [["🔄 Reload Captcha"]]
-
-    await update.message.reply_photo(
-        photo=open(f"{chat_id}.jpg","rb"),
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    )
-
-    await update.message.reply_text("🔐 Captcha লিখুন:")
-
-# ================= ROUTE =================
-@app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    application.update_queue.put_nowait(update)
-    return "ok"
-
-@app.route("/")
-def home():
-    return "Bot running..."
-
-# ================= RUN =================
 if __name__ == "__main__":
-    application.initialize()
-    application.start()
-    app.run(host="0.0.0.0", port=10000)
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
