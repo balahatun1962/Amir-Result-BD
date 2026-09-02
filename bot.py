@@ -1,554 +1,178 @@
-import os
-import asyncio
 import logging
-import threading
-import re
-
 import requests
 from bs4 import BeautifulSoup
-from flask import Flask
-
-from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
-from aiogram.types import (
-    Message,
-    CallbackQuery,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
 )
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
 
-
-# =========================================================
-# CONFIG
-# =========================================================
-
-# Render-এর Environment Variables থেকে TOKEN কি-টি রিড করবে
-BOT_TOKEN = os.getenv("8751926796:AAEQBdgeQf9PRYRI9O4SLyp2SjIvY3SGN7E")
-
-BASE_URL = "https://certificate.comillaboard.gov.bd"
-
-PORT = int(os.getenv("PORT", "10000"))
-
-# Optional access control
-ALLOWED_USER_IDS = set()
-
-for item in os.getenv("ALLOWED_USER_IDS", "").split(","):
-    item = item.strip()
-    if item.isdigit():
-        ALLOWED_USER_IDS.add(int(item))
-
-
-# =========================================================
-# LOGGING
-# =========================================================
+# আপনার বটের টোকেন এখানে দিন
+BOT_TOKEN = "8751926796:AAEQBdgeQf9PRYRI9O4SLyp2SjIvY3SGN7E"
 
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
+# ইউজার সেশন স্টেট সাময়িকভাবে ধরে রাখার ডিকশনারি
+user_sessions = {}
 
-# =========================================================
-# FLASK
-# =========================================================
-
-app = Flask(__name__)
-
-
-@app.route("/")
-def home():
-    return "Student Information Bot is running."
-
-
-@app.route("/health")
-def health():
-    return "OK"
-
-
-def run_flask():
-    app.run(
-        host="0.0.0.0",
-        port=PORT
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 স্বাগতম! শিক্ষার্থী তথ্য জানতে শুধুমাত্র **রোল নম্বর** লিখে পাঠান।"
     )
 
+async def handle_roll(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    roll = update.message.text.strip()
+    if not roll.isdigit():
+        await update.message.reply_text("⚠️ অনুগ্রহ করে শুধুমাত্র সঠিক রোল নম্বর লিখুন।")
+        return
 
-# =========================================================
-# REQUEST HEADERS
-# =========================================================
+    chat_id = update.effective_chat.id
+    user_sessions[chat_id] = {"roll": roll}
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Linux; Android 10; K) "
-        "AppleWebKit/537.36 "
-        "(KHTML, like Gecko) "
-        "Chrome/139.0.0.0 "
-        "Mobile Safari/537.36"
-    ),
-    "Accept": (
-        "text/html,application/xhtml+xml,"
-        "application/xml;q=0.9,*/*;q=0.8"
-    ),
-    "Accept-Language": "en-US,en;q=0.9"
-}
-
-
-# =========================================================
-# BOT
-# =========================================================
-
-if not BOT_TOKEN:
-    raise RuntimeError(
-        "BOT_TOKEN environment variable is missing. Check your Render Environment Variables."
-    )
-
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
-
-
-# =========================================================
-# STATES
-# =========================================================
-
-class StudentSearch(StatesGroup):
-    waiting_exam = State()
-    waiting_year = State()
-    waiting_roll = State()
-
-
-# =========================================================
-# ACCESS CHECK
-# =========================================================
-
-def is_allowed(user_id: int) -> bool:
-    if not ALLOWED_USER_IDS:
-        return True
-    return user_id in ALLOWED_USER_IDS
-
-
-# =========================================================
-# EXAM KEYBOARD
-# =========================================================
-
-def exam_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📗 SSC",
-                    callback_data="exam_ssc"
-                ),
-                InlineKeyboardButton(
-                    text="📕 HSC",
-                    callback_data="exam_hsc"
-                )
-            ]
+    # SSC / HSC বাটন
+    keyboard = [
+        [
+            InlineKeyboardButton("SSC", callback_data="exam_ssc"),
+            InlineKeyboardButton("HSC", callback_data="exam_hsc"),
         ]
-    )
-
-
-# =========================================================
-# YEAR KEYBOARD
-# =========================================================
-
-def year_keyboard():
-    years = [
-        "2026",
-        "2025",
-        "2024",
-        "2023",
-        "2022",
-        "2021",
-        "2020"
     ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        f"রোল: *{roll}*\nএখন পরীক্ষার ধরন নির্বাচন করুন:",
+        reply_markup=reply_markup,
+        parse_mode="Markdown",
+    )
 
-    rows = []
-    for i in range(0, len(years), 2):
-        row = [
-            InlineKeyboardButton(
-                text=years[i],
-                callback_data=f"year_{years[i]}"
-            )
-        ]
-        if i + 1 < len(years):
-            row.append(
-                InlineKeyboardButton(
-                    text=years[i + 1],
-                    callback_data=f"year_{years[i + 1]}"
-                )
-            )
-        rows.append(row)
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = update.effective_chat.id
+    data = query.data
 
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    if chat_id not in user_sessions:
+        await query.edit_message_text("⚠️ সেশন মেয়াদোত্তীর্ণ হয়েছে। রোল নম্বর আবার পাঠান।")
+        return
 
+    # পরীক্ষার ধরন নির্বাচন
+    if data.startswith("exam_"):
+        exam_type = data.split("_")[1]
+        user_sessions[chat_id]["exam"] = exam_type
 
-# =========================================================
-# START
-# =========================================================
+        # ২০২০ থেকে ২০২৬ সালের বাটন
+        years = ["2020", "2021", "2022", "2023", "2024", "2025", "2026"]
+        keyboard = []
+        row = []
+        for y in years:
+            row.append(InlineKeyboardButton(y, callback_data=f"year_{y}"))
+            if len(row) == 3:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
 
-@dp.message(CommandStart())
-async def start_command(message: Message, state: FSMContext):
-    await state.clear()
-
-    if not is_allowed(message.from_user.id):
-        await message.answer(
-            "🔒 <b>Access Restricted</b>\n\n"
-            "এই bot-এ lookup করার অনুমতি নেই।",
-            parse_mode="HTML"
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            f"পরীক্ষা: *{exam_type.upper()}*\nপাশের বছর (Passing Year) নির্বাচন করুন:",
+            reply_markup=reply_markup,
+            parse_mode="Markdown",
         )
-        return
 
-    await state.set_state(StudentSearch.waiting_exam)
+    # পাশের বছর নির্বাচন ও ডেটা স্ক্র্যাপিং
+    elif data.startswith("year_"):
+        year = data.split("_")[1]
+        roll = user_sessions[chat_id].get("roll")
+        exam = user_sessions[chat_id].get("exam")
 
-    await message.answer(
-        "🎓 <b>Student Information Bot</b>\n\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "📚 Exam নির্বাচন করুন:\n"
-        "━━━━━━━━━━━━━━━━━━",
-        reply_markup=exam_keyboard(),
-        parse_mode="HTML"
-    )
+        await query.edit_message_text("⏳ তথ্য খোঁজা হচ্ছে, অনুগ্রহ করে অপেক্ষা করুন...")
 
+        # স্ক্র্যাপিং ফাংশন কল
+        result_text = fetch_student_info(exam, roll, year)
+        await query.edit_message_text(result_text, parse_mode="Markdown")
 
-# =========================================================
-# EXAM SELECT
-# =========================================================
+        # সেশন ক্লিয়ার
+        user_sessions.pop(chat_id, None)
 
-@dp.callback_query(StudentSearch.waiting_exam, F.data.startswith("exam_"))
-async def exam_selected(callback: CallbackQuery, state: FSMContext):
-    if not is_allowed(callback.from_user.id):
-        await callback.answer("Access denied.", show_alert=True)
-        return
-
-    exam = callback.data.replace("exam_", "").upper()
-
-    if exam not in ("SSC", "HSC"):
-        await callback.answer("Invalid exam.", show_alert=True)
-        return
-
-    await state.update_data(exam=exam)
-    await state.set_state(StudentSearch.waiting_year)
-
-    await callback.message.edit_text(
-        "🎓 <b>Student Information Bot</b>\n\n"
-        f"📚 Exam: <b>{exam}</b>\n\n"
-        "📅 Passing Year নির্বাচন করুন:",
-        reply_markup=year_keyboard(),
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
-
-# =========================================================
-# YEAR SELECT
-# =========================================================
-
-@dp.callback_query(StudentSearch.waiting_year, F.data.startswith("year_"))
-async def year_selected(callback: CallbackQuery, state: FSMContext):
-    if not is_allowed(callback.from_user.id):
-        await callback.answer("Access denied.", show_alert=True)
-        return
-
-    year = callback.data.replace("year_", "")
-    allowed_years = {"2020", "2021", "2022", "2023", "2024", "2025", "2026"}
-
-    if year not in allowed_years:
-        await callback.answer("Invalid year.", show_alert=True)
-        return
-
-    await state.update_data(year=year)
-    await state.set_state(StudentSearch.waiting_roll)
-
-    data = await state.get_data()
-    exam = data.get("exam", "N/A")
-
-    await callback.message.edit_text(
-        "🎓 <b>Student Information Bot</b>\n\n"
-        f"📚 Exam: <b>{exam}</b>\n"
-        f"📅 Passing Year: <b>{year}</b>\n\n"
-        "🔢 এখন Roll Number লিখুন:\n\n"
-        "উদাহরণ: <code>571124</code>",
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
-
-# =========================================================
-# CLEAN TEXT
-# =========================================================
-
-def clean_text(value):
-    if value is None:
-        return ""
-    value = str(value)
-    value = value.replace("\xa0", " ")
-    value = re.sub(r"\s+", " ", value)
-    return value.strip()
-
-
-# =========================================================
-# FIND FIELD
-# =========================================================
-
-def find_field_value(section, label):
-    target = label.lower()
-
-    for tag in section.find_all(["label", "td", "th", "div", "span"]):
-        text = clean_text(tag.get_text(" ", strip=True))
-
-        if target not in text.lower():
-            continue
-
-        candidates = []
-
-        inp = tag.find("input")
-        if inp:
-            candidates.append(inp)
-
-        if tag.parent:
-            inp = tag.parent.find("input")
-            if inp:
-                candidates.append(inp)
-
-        inp = tag.find_next("input")
-        if inp:
-            candidates.append(inp)
-
-        for candidate in candidates:
-            value = clean_text(candidate.get("value", ""))
-            if value:
-                return value
-
-    return ""
-
-
-# =========================================================
-# FETCH STUDENT
-# =========================================================
-
-def fetch_student(exam, roll, year):
-    exam_code = exam.lower()
-    url = (
-        f"{BASE_URL}/find/duplicate"
-        f"?exam={exam_code}"
-        f"&roll={roll}"
-        f"&year={year}"
-    )
-
-    logging.info("Request: %s", url)
-
-    session = requests.Session()
-    session.headers.update(HEADERS)
-
-    try:
-        session.get(BASE_URL, timeout=20)
-    except requests.RequestException:
-        pass
-
-    response = session.get(url, timeout=20)
-    response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    student_section = None
-    for fieldset in soup.find_all("fieldset"):
-        text = clean_text(fieldset.get_text(" ", strip=True))
-        if "Student Information" in text:
-            student_section = fieldset
-            break
-
-    if student_section is None:
-        page_text = clean_text(soup.get_text(" ", strip=True))
-        if "Student Information" not in page_text:
-            return None
-        student_section = soup
-
-    result = {
-        "Exam": find_field_value(student_section, "Exam") or exam.upper(),
-        "Board": find_field_value(student_section, "Board"),
-        "Roll": find_field_value(student_section, "Roll Number") or roll,
-        "Passing Year": find_field_value(student_section, "Passing Year") or year,
-        "Registration Number": find_field_value(student_section, "Registration Number"),
-        "Session": find_field_value(student_section, "Session"),
-        "Name": find_field_value(student_section, "Name"),
-        "Father's Name": find_field_value(student_section, "Father's Name"),
-        "Mother's Name": find_field_value(student_section, "Mother's Name"),
-        "Sex": find_field_value(student_section, "Sex"),
-        "Date of Birth": find_field_value(student_section, "Date of Birth"),
-        "GPA": find_field_value(student_section, "GPA")
+def fetch_student_info(exam: str, roll: str, year: str) -> str:
+    url = "https://certificate.comillaboard.gov.bd/find/duplicate"
+    params = {"exam": exam, "roll": roll, "year": year}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://certificate.comillaboard.gov.bd/",
     }
 
-    useful_fields = [
-        "Registration Number",
-        "Session",
-        "Name",
-        "Father's Name",
-        "Mother's Name",
-        "Sex",
-        "GPA"
-    ]
-
-    if not any(result[field] for field in useful_fields):
-        return None
-
-    return result
-
-
-# =========================================================
-# FORMAT RESULT
-# =========================================================
-
-def format_result(result):
-    def value(key):
-        data = result.get(key, "")
-        return data if data else "N/A"
-
-    father_name = value("Father's Name")
-    mother_name = value("Mother's Name")
-
-    return (
-        "🎓 <b>Student Information</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        f"📘 <b>Exam:</b> {value('Exam')}\n"
-        f"🏫 <b>Board:</b> {value('Board')}\n"
-        f"🔢 <b>Roll:</b> {value('Roll')}\n"
-        f"📅 <b>Passing Year:</b> {value('Passing Year')}\n"
-        f"🪪 <b>Registration Number:</b> {value('Registration Number')}\n"
-        f"📚 <b>Session:</b> {value('Session')}\n"
-        f"👤 <b>Name:</b> {value('Name')}\n"
-        f"👨 <b>Father's Name:</b> {father_name}\n"
-        f"👩 <b>Mother's Name:</b> {mother_name}\n"
-        f"⚧ <b>Sex:</b> {value('Sex')}\n"
-        f"🎂 <b>Date of Birth:</b> {value('Date of Birth')}\n"
-        f"📊 <b>GPA:</b> {value('GPA')}\n\n"
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-
-# =========================================================
-# RECEIVE ROLL
-# =========================================================
-
-@dp.message(StudentSearch.waiting_roll)
-async def receive_roll(message: Message, state: FSMContext):
-    if not is_allowed(message.from_user.id):
-        await state.clear()
-        await message.answer("🔒 Access denied.")
-        return
-
-    roll = (message.text or "").strip()
-
-    if not re.fullmatch(r"\d{4,8}", roll):
-        await message.answer(
-            "❌ <b>সঠিক Roll Number দিন।</b>\n\n"
-            "শুধু সংখ্যা ব্যবহার করুন।\n"
-            "উদাহরণ: <code>571124</code>",
-            parse_mode="HTML"
-        )
-        return
-
-    data = await state.get_data()
-    exam = data.get("exam")
-    year = data.get("year")
-    allowed_years = {"2020", "2021", "2022", "2023", "2024", "2025", "2026"}
-
-    if exam not in ("SSC", "HSC") or year not in allowed_years:
-        await state.clear()
-        await message.answer(
-            "⚠️ Session expired.\n\n"
-            "আবার /start দিন।"
-        )
-        return
-
-    loading = await message.answer(
-        "🔎 <b>Searching...</b>\n\n"
-        f"📘 Exam: {exam}\n"
-        f"📅 Year: {year}\n"
-        f"🔢 Roll: {roll}\n\n"
-        "⏳ Please wait...",
-        parse_mode="HTML"
-    )
-
     try:
-        result = await asyncio.to_thread(fetch_student, exam, roll, year)
+        session = requests.Session()
+        # কুকি সংগ্রহের জন্য হোমপেজ ভিজিট
+        session.get("https://certificate.comillaboard.gov.bd/", headers=headers, timeout=10)
+        # রেজাল্ট রিকোয়েস্ট
+        res = session.get(url, params=params, headers=headers, timeout=15)
 
-        if not result:
-            await loading.edit_text(
-                "❌ <b>Student Information পাওয়া যায়নি।</b>\n\n"
-                f"📘 Exam: {exam}\n"
-                f"📅 Year: {year}\n"
-                f"🔢 Roll: {roll}",
-                parse_mode="HTML"
-            )
-        else:
-            await loading.edit_text(
-                format_result(result),
-                parse_mode="HTML"
-            )
+        if res.status_code != 200:
+            return "❌ সার্ভার থেকে তথ্য পাওয়া যায়নি (Server Error)।"
 
-    except requests.exceptions.Timeout:
-        await loading.edit_text(
-            "⏱️ <b>Server Timeout</b>\n\n"
-            "কিছুক্ষণ পরে আবার চেষ্টা করুন।",
-            parse_mode="HTML"
+        soup = BeautifulSoup(res.text, "html.parser")
+
+        # ইনপুট ফিল্ডগুলো খুঁজে বের করা
+        def get_val(name_attr):
+            elem = soup.find("input", {"name": name_attr})
+            if elem and elem.get("value"):
+                return elem.get("value").strip()
+            # অনেক সময় id ও name একই থাকে
+            elem = soup.find("input", {"id": name_attr})
+            if elem and elem.get("value"):
+                return elem.get("value").strip()
+            return None
+
+        # বিকল্প হিসেবে লেবেল ধরে ভ্যালু বের করা
+        data = {}
+        for row in soup.find_all("div", class_="form-group"):
+            label = row.find("label")
+            inp = row.find("input")
+            if label and inp and inp.get("value"):
+                data[label.text.strip()] = inp.get("value").strip()
+
+        name = get_val("name") or data.get("Name")
+        if not name:
+            return f"❌ রোল: *{roll}*, বছর: *{year}* ({exam.upper()}) এর কোনো তথ্য পাওয়া যায়নি।"
+
+        father = get_val("father_name") or data.get("Father's Name", "N/A")
+        mother = get_val("mother_name") or data.get("Mother's Name", "N/A")
+        reg = get_val("reg_no") or data.get("Registration Number", "N/A")
+        session_val = get_val("session") or data.get("Session", "N/A")
+        dob = get_val("dob") or data.get("Date of Birth", "N/A")
+        gpa = get_val("gpa") or data.get("GPA", "N/A")
+        gender = get_val("sex") or data.get("Sex", "N/A")
+
+        output = (
+            f"🎓 *শিক্ষার্থীর তথ্য ({exam.upper()} - {year})*\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 *নাম:* `{name}`\n"
+            f"👨‍👦 *পিতার নাম:* `{father}`\n"
+            f"👩‍👦 *মাতার নাম:* `{mother}`\n"
+            f"🆔 *রোল নম্বর:* `{roll}`\n"
+            f"📝 *রেজিস্ট্রেশন:* `{reg}`\n"
+            f"📅 *সেশন:* `{session_val}`\n"
+            f"🎂 *জন্ম তারিখ:* `{dob}`\n"
+            f"⚧️ *লিঙ্গ:* `{gender}`\n"
+            f"📊 *GPA:* `{gpa}`\n"
+            f"━━━━━━━━━━━━━━━━━━━"
         )
-    except requests.exceptions.ConnectionError:
-        await loading.edit_text(
-            "🌐 <b>Connection Error</b>\n\n"
-            "Certificate server-এর সাথে সংযোগ করা যাচ্ছে না।",
-            parse_mode="HTML"
-        )
-    except requests.exceptions.HTTPError:
-        await loading.edit_text(
-            "⚠️ <b>Website Error</b>\n\n"
-            "Certificate server error response দিয়েছে।",
-            parse_mode="HTML"
-        )
-    except Exception as error:
-        logging.exception("Lookup error: %s", error)
-        await loading.edit_text(
-            "⚠️ <b>Unexpected Error</b>\n\n"
-            "তথ্য প্রসেস করতে সমস্যা হয়েছে।",
-            parse_mode="HTML"
-        )
-    finally:
-        await state.clear()
+        return output
 
-
-# =========================================================
-# UNKNOWN MESSAGE
-# =========================================================
-
-@dp.message()
-async def unknown_message(message: Message):
-    await message.answer(
-        "🤖 নতুন করে শুরু করতে <b>/start</b> দিন।",
-        parse_mode="HTML"
-    )
-
-
-# =========================================================
-# MAIN
-# =========================================================
-
-async def main():
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-
-    logging.info("Flask server started on port %s", PORT)
-    logging.info("Bot Running...")
-
-    await dp.start_polling(bot)
-
-
-# =========================================================
-# RUN
-# =========================================================
+    except Exception as e:
+        return f"⚠️ ত্রুটি ঘটেছে: {str(e)}"
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("Bot stopped.")
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_roll))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+
+    print("বট সফলভাবে চালু হয়েছে...")
+    app.run_polling()
