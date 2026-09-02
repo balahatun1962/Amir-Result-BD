@@ -1,6 +1,9 @@
+import os
 import logging
+import threading
 import requests
 from bs4 import BeautifulSoup
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -11,14 +14,26 @@ from telegram.ext import (
     filters,
 )
 
-# আপনার বটের টোকেন এখানে দিন
-BOT_TOKEN = "8751926796:AAEQBdgeQf9PRYRI9O4SLyp2SjIvY3SGN7E"
+# Render বা Environment Variable থেকে টোকেন নেওয়ার ব্যবস্থা (অথবা সরাসরি স্ট্রিং বসান)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8751926796:AAEQBdgeQf9PRYRI9O4SLyp2SjIvY3SGN7E")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
-# ইউজার সেশন স্টেট সাময়িকভাবে ধরে রাখার ডিকশনারি
+# ----------------- FLASK DUMMY SERVER (FOR RENDER) -----------------
+flask_app = Flask(__name__)
+
+@flask_app.route("/")
+def home():
+    return "Bot is running fine!"
+
+def run_flask():
+    # Render পরিবেশের নির্ধারিত PORT ভ্যারিয়েবল রিড করবে (ডিফল্ট 8080)
+    port = int(os.environ.get("PORT", 8080))
+    flask_app.run(host="0.0.0.0", port=port)
+# -------------------------------------------------------------------
+
 user_sessions = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -35,7 +50,6 @@ async def handle_roll(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_sessions[chat_id] = {"roll": roll}
 
-    # SSC / HSC বাটন
     keyboard = [
         [
             InlineKeyboardButton("SSC", callback_data="exam_ssc"),
@@ -59,12 +73,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⚠️ সেশন মেয়াদোত্তীর্ণ হয়েছে। রোল নম্বর আবার পাঠান।")
         return
 
-    # পরীক্ষার ধরন নির্বাচন
     if data.startswith("exam_"):
         exam_type = data.split("_")[1]
         user_sessions[chat_id]["exam"] = exam_type
 
-        # ২০২০ থেকে ২০২৬ সালের বাটন
         years = ["2020", "2021", "2022", "2023", "2024", "2025", "2026"]
         keyboard = []
         row = []
@@ -83,7 +95,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
 
-    # পাশের বছর নির্বাচন ও ডেটা স্ক্র্যাপিং
     elif data.startswith("year_"):
         year = data.split("_")[1]
         roll = user_sessions[chat_id].get("roll")
@@ -91,11 +102,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text("⏳ তথ্য খোঁজা হচ্ছে, অনুগ্রহ করে অপেক্ষা করুন...")
 
-        # স্ক্র্যাপিং ফাংশন কল
         result_text = fetch_student_info(exam, roll, year)
         await query.edit_message_text(result_text, parse_mode="Markdown")
 
-        # সেশন ক্লিয়ার
         user_sessions.pop(chat_id, None)
 
 def fetch_student_info(exam: str, roll: str, year: str) -> str:
@@ -108,9 +117,7 @@ def fetch_student_info(exam: str, roll: str, year: str) -> str:
 
     try:
         session = requests.Session()
-        # কুকি সংগ্রহের জন্য হোমপেজ ভিজিট
         session.get("https://certificate.comillaboard.gov.bd/", headers=headers, timeout=10)
-        # রেজাল্ট রিকোয়েস্ট
         res = session.get(url, params=params, headers=headers, timeout=15)
 
         if res.status_code != 200:
@@ -118,18 +125,15 @@ def fetch_student_info(exam: str, roll: str, year: str) -> str:
 
         soup = BeautifulSoup(res.text, "html.parser")
 
-        # ইনপুট ফিল্ডগুলো খুঁজে বের করা
         def get_val(name_attr):
             elem = soup.find("input", {"name": name_attr})
             if elem and elem.get("value"):
                 return elem.get("value").strip()
-            # অনেক সময় id ও name একই থাকে
             elem = soup.find("input", {"id": name_attr})
             if elem and elem.get("value"):
                 return elem.get("value").strip()
             return None
 
-        # বিকল্প হিসেবে লেবেল ধরে ভ্যালু বের করা
         data = {}
         for row in soup.find_all("div", class_="form-group"):
             label = row.find("label")
@@ -169,10 +173,15 @@ def fetch_student_info(exam: str, roll: str, year: str) -> str:
         return f"⚠️ ত্রুটি ঘটেছে: {str(e)}"
 
 if __name__ == "__main__":
+    # ব্যাকগ্রাউন্ডে Flask সার্ভার চালু করা
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
+    # টেলিগ্রাম বট রান করা
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_roll))
     app.add_handler(CallbackQueryHandler(handle_callback))
 
-    print("বট সফলভাবে চালু হয়েছে...")
+    print("বট এবং Flask সার্ভার সফলভাবে চালু হয়েছে...")
     app.run_polling()
