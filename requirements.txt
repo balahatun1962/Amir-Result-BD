@@ -1,5 +1,5 @@
+aiogram>=3.0.0
 flask
-flask_cors
 requests
 beautifulsoup4
-gunicorn
+Pillow
